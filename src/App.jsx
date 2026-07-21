@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import UnoCard from './UnoCard.jsx'
+import PlayingCard, { PlayingCardBack } from './PlayingCard.jsx'
+import { PLAYING_CARDS } from './playingCards.js'
 import { socket } from './socket.js'
 
 const COLOR_LABELS = {
@@ -18,6 +20,8 @@ export default function App() {
   const [room, setRoom] = useState(null)
   const [notice, setNotice] = useState('Đang kết nối máy chủ...')
   const [selectedColor, setSelectedColor] = useState(null)
+  const [isCardGalleryOpen, setIsCardGalleryOpen] = useState(false)
+  const [gameMode, setGameMode] = useState('uno-flip')
 
   useEffect(() => {
     const onState = (state) => {
@@ -46,7 +50,7 @@ export default function App() {
   const activeColors = room?.activeSide === 'dark'
     ? ['pink', 'teal', 'orange', 'purple']
     : ['red', 'yellow', 'green', 'blue']
-  const inviteText = room ? `Vào phòng UNO Flip của tôi với mã: ${room.code}` : ''
+  const inviteText = room ? `Vào phòng ${room.gameMode === 'xi-dach' ? 'Xì Dách' : 'UNO Flip'} của tôi với mã: ${room.code}` : ''
 
   const playersInOrder = useMemo(() => {
     if (!room) return []
@@ -61,7 +65,7 @@ export default function App() {
   }
 
   function createRoom() {
-    socket.emit('room:create', { name: persistName() }, (result) => {
+    socket.emit('room:create', { name: persistName(), gameMode }, (result) => {
       if (!result?.ok) setNotice(result?.message ?? 'Không thể tạo phòng.')
     })
   }
@@ -99,9 +103,13 @@ export default function App() {
     return (
       <main className="lobby-shell">
         <section className="lobby-card" aria-labelledby="welcome-title">
-          <p className="eyebrow">UNO FLIP · REALTIME TABLE</p>
-          <h1 id="welcome-title">Lật bài.<br />Đổi cuộc chơi.</h1>
-          <p className="lead">Tạo bàn riêng, gửi mã mời và chơi UNO Flip trực tiếp với bạn bè.</p>
+          <p className="eyebrow">MEGA BÀN CHƠI · REALTIME</p>
+          <h1 id="welcome-title">Chọn bàn.<br />Vào cuộc chơi.</h1>
+          <p className="lead">Chọn game, tạo phòng riêng và gửi mã mời cho bạn bè.</p>
+          <div className="game-mode-picker" aria-label="Chọn trò chơi">
+            <button className={gameMode === 'uno-flip' ? 'selected' : ''} onClick={() => setGameMode('uno-flip')}><b>UNO FLIP</b><span>2–10 người · lật hai mặt</span></button>
+            <button className={gameMode === 'xi-dach' ? 'selected' : ''} onClick={() => setGameMode('xi-dach')}><b>XÌ DÁCH</b><span>2–6 người · nặm bài hồi hộp</span></button>
+          </div>
           <label className="field-label" htmlFor="player-name">Tên hiển thị</label>
           <input id="player-name" className="text-input" maxLength="20" value={name} onChange={(event) => setName(event.target.value)} placeholder="Ví dụ: Phúc" />
           <div className="lobby-actions">
@@ -114,8 +122,10 @@ export default function App() {
             <button className="secondary-button" onClick={joinRoom}>Vào bàn</button>
           </div>
           <p className="notice" role="status">{notice}</p>
-          <p className="rule-note">Luật chuẩn: 2–10 người · không cộng dồn lá phạt · Wild Draw có thể bị thách đấu.</p>
+          <button className="deck-preview-button" onClick={() => setIsCardGalleryOpen(true)}>Xem bộ 52 lá · Xì Dách</button>
+          <p className="rule-note">{gameMode === 'xi-dach' ? 'Xì Dách: 2–6 người · Át tính 1 hoặc 11 · Xì Dách ưu tiên Ngũ linh · không cược.' : 'UNO Flip: 2–10 người · không cộng dồn lá phạt · Wild Draw có thể bị thách đấu.'}</p>
         </section>
+        {isCardGalleryOpen && <PlayingCardGallery onClose={() => setIsCardGalleryOpen(false)} />}
       </main>
     )
   }
@@ -140,6 +150,8 @@ export default function App() {
           ) : <p className="notice">Đang chờ chủ phòng bắt đầu ván.</p>}
           <p className="notice" role="status">{notice}</p>
         </section>
+      ) : room.gameMode === 'xi-dach' ? (
+        <XiDachTable room={room} notice={notice} />
       ) : (
         <section className="table-layout">
           <aside className="opponents" aria-label="Người chơi">
@@ -175,5 +187,63 @@ export default function App() {
         </section>
       )}
     </main>
+  )
+}
+
+function XiDachTable({ room, notice }) {
+  const you = room.players.find((player) => player.isYou)
+  const isYourTurn = you?.id === room.currentPlayerId
+  const resultLabel = room.result?.outcome === 'win' ? 'BẠN THẮNG' : room.result?.outcome === 'lose' ? 'BẠN THUA' : room.result ? 'HÒA VÁN' : null
+
+  return (
+    <section className="xidach-table">
+      <div className="xidach-ruleline">XÌ DÁCH · 2–6 NGƯỜI · MỖI LÁ BỐC SẼ ĐƯỢC NẶM RIÊNG</div>
+      <section className="dealer-zone">
+        <div className="zone-label"><span>NHÀ CÁI</span><b>{room.dealer.revealed ? `${room.dealer.total} ĐIỂM` : 'ĐANG GIỮ BÀI ÚP'}</b></div>
+        <div className="xidach-cards dealer-cards">
+          {room.dealer.cards.map((card) => <PlayingCard card={card} compact key={card.id} />)}
+          {Array.from({ length: room.dealer.hiddenCount }, (_, index) => <PlayingCardBack compact key={`hidden-${index}`} />)}
+        </div>
+      </section>
+
+      <section className="xidach-status">
+        <p>{room.status === 'finished' ? 'KẾT QUẢ VÁN BÀI' : isYourTurn ? 'TỚI LƯỢT BẠN — NẶM HAY DẰN?' : `ĐANG CHỜ ${room.players.find((player) => player.id === room.currentPlayerId)?.name?.toUpperCase() ?? 'NHÀ CÁI'}`}</p>
+        {resultLabel && <div className={`result-banner result-${room.result.outcome}`}><strong>{resultLabel}</strong><span>{room.result.reason} · Bạn {room.result.total} / Nhà cái {room.result.dealerTotal}</span></div>}
+      </section>
+
+      <section className="xidach-players" aria-label="Người chơi khác">
+        {room.players.filter((player) => !player.isYou).map((player) => <div className={`xidach-opponent ${player.id === room.currentPlayerId ? 'active' : ''}`} key={player.id}><span className="avatar">{player.name.slice(0, 1).toUpperCase()}</span><div><b>{player.name}</b><small>{player.cardCount} lá · {player.status === 'busted' ? 'Quắc' : player.status === 'stood' ? 'Đã dằn' : player.status === 'blackjack' ? 'Xì Dách' : player.status === 'five-card' ? 'Ngũ linh' : 'Đang nặm'}</small></div></div>)}
+      </section>
+
+      <section className="your-xidach-hand">
+        <div className="zone-label"><span>BÀI CỦA BẠN</span><b>{room.yourTotal} ĐIỂM · {room.hand.length} LÁ</b></div>
+        <div className="xidach-cards your-xidach-cards">
+          {room.hand.map((card, index) => <div className="naming-card" style={{ '--deal-order': index }} key={card.id}><PlayingCard card={card} /></div>)}
+        </div>
+        {room.status === 'playing' && <div className="xidach-actions"><button className="hit-button" disabled={!room.canHit} onClick={() => socket.emit('xidach:hit', { code: room.code })}>Nặm thêm lá</button><button className="stand-button" disabled={!room.canStand} onClick={() => socket.emit('xidach:stand', { code: room.code })}>Dằn bài</button></div>}
+        {room.status === 'finished' && you?.isHost && <button className="hit-button restart-xidach" onClick={() => socket.emit('xidach:restart', { code: room.code })}>Chia ván mới</button>}
+      </section>
+      <p className="notice xidach-notice" role="status">{notice}</p>
+    </section>
+  )
+}
+
+function PlayingCardGallery({ onClose }) {
+  return (
+    <div className="playing-gallery-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="playing-gallery" role="dialog" aria-modal="true" aria-labelledby="playing-gallery-title" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="playing-gallery-header">
+          <div>
+            <p className="eyebrow">BỘ BÀI TIÊU CHUẨN · 52 LÁ</p>
+            <h2 id="playing-gallery-title">Xì Dách<br />Deck No. 01</h2>
+          </div>
+          <button className="gallery-close" aria-label="Đóng bộ bài" onClick={onClose}>×</button>
+        </header>
+        <p className="gallery-intro">Thiết kế cổ điển với dấu ấn casino Á Đông: bích, cơ, rô, tép — đủ 52 lá, chưa gồm Joker.</p>
+        <div className="playing-gallery-grid">
+          {PLAYING_CARDS.map((card) => <PlayingCard card={card} key={card.id} />)}
+        </div>
+      </section>
+    </div>
   )
 }

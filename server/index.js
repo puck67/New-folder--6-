@@ -23,6 +23,15 @@ const WILDS = {
   dark: ['wild', 'wilddrawcolor'],
 }
 
+const XI_DACH_SUITS = [
+  { id: 'spades', symbol: '♠', label: 'Bích', color: 'black' },
+  { id: 'hearts', symbol: '♥', label: 'Cơ', color: 'red' },
+  { id: 'diamonds', symbol: '♦', label: 'Rô', color: 'red' },
+  { id: 'clubs', symbol: '♣', label: 'Tép', color: 'black' },
+]
+const XI_DACH_RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
+const XI_DACH_MAX_PLAYERS = 6
+
 const rooms = new Map()
 
 function createFace(side, color, kind, extra = {}) {
@@ -73,6 +82,37 @@ function shuffle(cards) {
 
 function otherSide(side) {
   return side === 'light' ? 'dark' : 'light'
+}
+
+function createXiDachDeck() {
+  return XI_DACH_SUITS.flatMap((suit) => XI_DACH_RANKS.map((rank) => ({
+    id: `${rank}-${suit.id}`, rank, ...suit,
+  })))
+}
+
+function xiDachTotal(cards) {
+  let total = 0
+  let aces = 0
+  for (const card of cards) {
+    if (card.rank === 'A') { total += 1; aces += 1 }
+    else total += ['J', 'Q', 'K'].includes(card.rank) ? 10 : Number(card.rank)
+  }
+  if (aces > 0 && total + 10 <= 21) total += 10
+  return total
+}
+
+function xiDachState(cards) {
+  const total = xiDachTotal(cards)
+  if (cards.length === 2 && total === 21) return 'blackjack'
+  if (total > 21) return 'busted'
+  if (cards.length === 5) return 'five-card'
+  return 'active'
+}
+
+function drawXiDach(room, hand) {
+  const card = room.xiDach.deck.pop()
+  if (card) hand.push(card)
+  return card
 }
 
 function createRoomCode() {
@@ -283,11 +323,112 @@ function drawUntilColor(room, player, color) {
   } while (room.drawPile.length > 0 || room.discardPile.length > 1)
 }
 
+function startXiDachGame(room) {
+  room.status = 'playing'
+  room.xiDach = {
+    phase: 'player-turns',
+    deck: shuffle(createXiDachDeck()),
+    dealerHand: [],
+    dealerRevealed: false,
+    turnIndex: 0,
+    results: null,
+  }
+  for (const player of room.players) {
+    player.hand = []
+    drawXiDach(room, player.hand)
+    drawXiDach(room, player.hand)
+    player.xiDachStatus = xiDachState(player.hand)
+  }
+  drawXiDach(room, room.xiDach.dealerHand)
+  drawXiDach(room, room.xiDach.dealerHand)
+  advanceXiDachTurn(room)
+}
+
+function advanceXiDachTurn(room) {
+  const game = room.xiDach
+  while (game.turnIndex < room.players.length && room.players[game.turnIndex].xiDachStatus !== 'active') game.turnIndex += 1
+  if (game.turnIndex < room.players.length) return
+  resolveXiDachDealer(room)
+}
+
+function resolveXiDachDealer(room) {
+  const game = room.xiDach
+  game.phase = 'dealer-turn'
+  game.dealerRevealed = true
+  let dealerStatus = xiDachState(game.dealerHand)
+  while (dealerStatus === 'active' && xiDachTotal(game.dealerHand) < 17) {
+    if (!drawXiDach(room, game.dealerHand)) break
+    dealerStatus = xiDachState(game.dealerHand)
+  }
+  const dealerTotal = xiDachTotal(game.dealerHand)
+  game.results = {}
+  for (const player of room.players) {
+    const total = xiDachTotal(player.hand)
+    let outcome = 'push'
+    let reason = 'Hòa điểm'
+    if (player.xiDachStatus === 'busted') { outcome = 'lose'; reason = 'Quắc' }
+    else if (player.xiDachStatus === 'blackjack' && dealerStatus !== 'blackjack') { outcome = 'win'; reason = 'Xì Dách' }
+    else if (dealerStatus === 'blackjack' && player.xiDachStatus !== 'blackjack') { outcome = 'lose'; reason = 'Nhà cái Xì Dách' }
+    else if (player.xiDachStatus === 'five-card' && dealerStatus !== 'five-card') { outcome = 'win'; reason = 'Ngũ linh' }
+    else if (dealerStatus === 'five-card' && player.xiDachStatus !== 'five-card') { outcome = 'lose'; reason = 'Nhà cái Ngũ linh' }
+    else if (dealerStatus === 'busted') { outcome = 'win'; reason = 'Nhà cái quắc' }
+    else if (total > dealerTotal) { outcome = 'win'; reason = 'Điểm cao hơn' }
+    else if (total < dealerTotal) { outcome = 'lose'; reason = 'Điểm thấp hơn' }
+    game.results[player.id] = { outcome, reason, total, dealerTotal }
+  }
+  game.phase = 'settled'
+  room.status = 'finished'
+}
+
+function xiDachPlayerView(room, viewerSocketId) {
+  const viewer = findPlayer(room, viewerSocketId)
+  if (!room.xiDach) {
+    return {
+      code: room.code, gameMode: 'xi-dach', status: room.status, hostId: room.hostId,
+      phase: 'waiting', currentPlayerId: null, hand: [], yourTotal: 0,
+      players: room.players.map((player) => ({ id: player.id, name: player.name, connected: player.connected, cardCount: 0, status: 'waiting', isHost: player.id === room.hostId, isYou: player.socketId === viewerSocketId })),
+      dealer: { cardCount: 0, cards: [], hiddenCount: 0, total: 0, revealed: false },
+      canHit: false, canStand: false, result: null, resultsVisible: null,
+    }
+  }
+  const game = room.xiDach
+  const currentPlayer = room.players[game.turnIndex]
+  const dealerCards = game.dealerRevealed ? game.dealerHand : game.dealerHand.slice(0, 1)
+  return {
+    code: room.code,
+    gameMode: 'xi-dach',
+    status: room.status,
+    hostId: room.hostId,
+    phase: game.phase,
+    currentPlayerId: currentPlayer?.id ?? null,
+    players: room.players.map((player) => ({
+      id: player.id, name: player.name, connected: player.connected,
+      cardCount: player.hand.length, status: player.xiDachStatus,
+      isHost: player.id === room.hostId, isYou: player.socketId === viewerSocketId,
+    })),
+    hand: viewer ? viewer.hand : [],
+    yourTotal: viewer ? xiDachTotal(viewer.hand) : 0,
+    dealer: {
+      cardCount: game.dealerHand.length,
+      cards: dealerCards,
+      hiddenCount: game.dealerRevealed ? 0 : Math.max(0, game.dealerHand.length - dealerCards.length),
+      total: game.dealerRevealed ? xiDachTotal(game.dealerHand) : xiDachTotal(dealerCards),
+      revealed: game.dealerRevealed,
+    },
+    canHit: room.status === 'playing' && currentPlayer?.socketId === viewerSocketId && viewer?.xiDachStatus === 'active',
+    canStand: room.status === 'playing' && currentPlayer?.socketId === viewerSocketId && viewer?.xiDachStatus === 'active',
+    result: game.results?.[viewer?.id] ?? null,
+    resultsVisible: game.results ? room.players.map((player) => ({ id: player.id, result: game.results[player.id] })) : null,
+  }
+}
+
 function playerView(room, viewerSocketId) {
+  if (room.gameMode === 'xi-dach') return xiDachPlayerView(room, viewerSocketId)
   const viewer = findPlayer(room, viewerSocketId)
   const currentPlayer = room.players[room.turnIndex]
   return {
     code: room.code,
+    gameMode: 'uno-flip',
     status: room.status,
     hostId: room.hostId,
     activeSide: room.activeSide,
@@ -347,11 +488,12 @@ io.on('connection', (socket) => {
     next()
   })
 
-  socket.on('room:create', ({ name } = {}, acknowledge) => {
+  socket.on('room:create', ({ name, gameMode } = {}, acknowledge) => {
     if (socketAlreadyInRoom(socket.id)) return acknowledge?.({ ok: false, message: 'Bạn đang ở trong một phòng khác.' })
     const code = createRoomCode()
+    const mode = gameMode === 'xi-dach' ? 'xi-dach' : 'uno-flip'
     const player = { id: randomUUID(), socketId: socket.id, name: normalizeName(name), hand: [], connected: true, calledUno: false }
-    const room = { code, hostId: player.id, players: [player], status: 'waiting', activeSide: 'light', direction: 1 }
+    const room = { code, hostId: player.id, players: [player], status: 'waiting', gameMode: mode, activeSide: 'light', direction: 1 }
     rooms.set(code, room)
     socket.join(code)
     broadcastRoom(room)
@@ -363,7 +505,8 @@ io.on('connection', (socket) => {
     const room = rooms.get(normalizeCode(code))
     if (!room) return acknowledge?.({ ok: false, message: 'Không tìm thấy phòng.' })
     if (room.status !== 'waiting') return acknowledge?.({ ok: false, message: 'Ván chơi đã bắt đầu.' })
-    if (room.players.length >= MAX_PLAYERS) return acknowledge?.({ ok: false, message: 'Phòng đã đủ người.' })
+    const maxPlayers = room.gameMode === 'xi-dach' ? XI_DACH_MAX_PLAYERS : MAX_PLAYERS
+    if (room.players.length >= maxPlayers) return acknowledge?.({ ok: false, message: 'Phòng đã đủ người.' })
     if (findPlayer(room, socket.id)) return acknowledge?.({ ok: false, message: 'Bạn đã trong phòng này.' })
 
     room.players.push({ id: randomUUID(), socketId: socket.id, name: normalizeName(name), hand: [], connected: true, calledUno: false })
@@ -377,7 +520,43 @@ io.on('connection', (socket) => {
     if (!room || room.hostId !== findPlayer(room, socket.id)?.id) return emitError(socket, 'Chỉ chủ phòng mới có thể bắt đầu.')
     if (room.players.length < MIN_PLAYERS) return emitError(socket, 'Cần ít nhất 2 người chơi.')
     if (room.status === 'playing') return
-    startGame(room)
+    if (room.gameMode === 'xi-dach') startXiDachGame(room)
+    else startGame(room)
+    broadcastRoom(room)
+  })
+
+  socket.on('xidach:hit', ({ code } = {}) => {
+    const room = rooms.get(normalizeCode(code))
+    const player = room && findPlayer(room, socket.id)
+    if (!room || !player || room.gameMode !== 'xi-dach' || room.status !== 'playing') return
+    const game = room.xiDach
+    if (room.players[game.turnIndex]?.id !== player.id || player.xiDachStatus !== 'active') return emitError(socket, 'Chưa đến lượt của bạn.')
+    if (!drawXiDach(room, player.hand)) return emitError(socket, 'Bộ bài đã hết.')
+    player.xiDachStatus = xiDachState(player.hand)
+    if (player.xiDachStatus !== 'active') {
+      game.turnIndex += 1
+      advanceXiDachTurn(room)
+    }
+    broadcastRoom(room)
+  })
+
+  socket.on('xidach:stand', ({ code } = {}) => {
+    const room = rooms.get(normalizeCode(code))
+    const player = room && findPlayer(room, socket.id)
+    if (!room || !player || room.gameMode !== 'xi-dach' || room.status !== 'playing') return
+    const game = room.xiDach
+    if (room.players[game.turnIndex]?.id !== player.id || player.xiDachStatus !== 'active') return emitError(socket, 'Chưa đến lượt của bạn.')
+    player.xiDachStatus = 'stood'
+    game.turnIndex += 1
+    advanceXiDachTurn(room)
+    broadcastRoom(room)
+  })
+
+  socket.on('xidach:restart', ({ code } = {}) => {
+    const room = rooms.get(normalizeCode(code))
+    if (!room || room.gameMode !== 'xi-dach' || room.hostId !== findPlayer(room, socket.id)?.id) return emitError(socket, 'Chỉ chủ phòng mới được chia ván mới.')
+    if (room.status !== 'finished') return
+    startXiDachGame(room)
     broadcastRoom(room)
   })
 
